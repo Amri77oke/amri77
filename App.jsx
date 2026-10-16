@@ -27,6 +27,8 @@ import * as transition13 from '@remotion/transitions/swap';
 import * as transition14 from '@remotion/transitions/push-cut';
 import * as transition15 from '@remotion/transitions/blur-slide';
 import {renderMediaOnWeb, renderStillOnWeb, canRenderMediaOnWeb} from '@remotion/web-renderer';
+import {PRESETS, validateSettings, bitrateFor} from './export-settings.js';
+import {exportWebAnimation} from './web-export.js';
 import {createPreviewDocument} from './html-preview.js';
 import * as media from '@remotion/media';
 import * as layout from '@remotion/layout-utils';
@@ -54,7 +56,7 @@ function compile(src) {
   return {comp, config: ex.config || {}};
 }
 const save = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
-const PRESETS = {'HD 1280×720': [1280, 720], 'Full HD 1920×1080': [1920, 1080], 'Persegi 1080×1080': [1080, 1080], 'Vertikal 1080×1920': [1080, 1920]};
+
 
 export default function App() {
   const first = Object.keys(TEMPLATES)[0];
@@ -63,10 +65,16 @@ export default function App() {
   const [html, setHtml] = useState(HTML_TEMPLATE);
   const [css, setCss] = useState(CSS_TEMPLATE);
   const [previewKey, setPreviewKey] = useState(0);
-  const iframe = useRef(null);
+  const iframe = useRef(null), stage = useRef(null);
+  const [stageWidth, setStageWidth] = useState(640);
+  useEffect(() => {
+    const observer = new ResizeObserver(([entry]) => setStageWidth(entry.contentRect.width));
+    observer.observe(stage.current); return () => observer.disconnect();
+  }, []);
   const source = mode === 'html' ? html : mode === 'css' ? css : code;
   const updateSource = mode === 'html' ? setHtml : mode === 'css' ? setCss : setCode;
   const [documentSource, setDocumentSource] = useState('');
+  const [preparedSource, setPreparedSource] = useState('');
   const [cfg, setCfg] = useState({width: 1280, height: 720, fps: 30, dur: 4});
   const [comp, setComp] = useState(null);
   const [err, setErr] = useState('');
@@ -74,8 +82,12 @@ export default function App() {
   const [prog, setProg] = useState(null);
   const [msg, setMsg] = useState('');
   const player = useRef(null), abort = useRef(null), lastCfg = useRef('');
+  const previewScale = stageWidth / cfg.width;
   const frames = Math.max(1, Math.round(cfg.dur * cfg.fps));
-  const set = (k) => (e) => setCfg((c) => ({...c, [k]: Math.max(0.1, Number(e.target.value) || 1)}));
+  const set = (k) => (e) => setCfg((c) => ({...c, [k]: Number(e.target.value)}));
+  let settingsError = '';
+  try { validateSettings(cfg); } catch (e) { settingsError = e.message; }
+  const busy = prog !== null;
 
   useEffect(() => {
     const receive = (event) => {
@@ -88,15 +100,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (busy) return;
     const t = setTimeout(() => {
       setErr('');
       if (mode !== 'remotion') {
         setDocumentSource(createPreviewDocument(source, mode));
+        setPreparedSource(mode + source);
         return;
       }
       try {
         const r = compile(code);
-        setComp(() => r.comp); setErr('');
+        setComp(() => r.comp); setErr(''); setPreparedSource(mode + source);
         const key = JSON.stringify(r.config);
         if (key !== lastCfg.current) {
           lastCfg.current = key;
@@ -108,28 +122,46 @@ export default function App() {
       } catch (e) { setComp(null); setErr(String(e.message || e)); }
     }, 500);
     return () => clearTimeout(t);
-  }, [code, source, mode]);
+  }, [code, source, mode, busy]);
 
   const composition = () => ({id: 'main', component: comp, durationInFrames: frames, fps: cfg.fps, width: cfg.width, height: cfg.height});
 
   async function exportMp4() {
-    setMsg('');
+    if (abort.current) return;
+    const controller = new AbortController(); abort.current = controller;
+    setMsg('Memeriksa encoder dan menyiapkan aset…'); setProg(0);
     try {
-      const chk = await canRenderMediaOnWeb({width: cfg.width, height: cfg.height, container: 'mp4', videoCodec: 'h264'});
-      if (!chk.canRender) { setMsg(chk.issues.map((i) => i.message).join('\n')); return; }
-      abort.current = new AbortController(); setProg(0);
-      const {getBlob} = await renderMediaOnWeb({composition: composition(), container: 'mp4', videoCodec: 'h264',
-        videoBitrate: quality, signal: abort.current.signal, onProgress: (p) => setProg(p.renderedFrames / frames)});
-      save(await getBlob(), 'animasi.mp4'); setMsg('Selesai: animasi.mp4 terunduh.');
-    } catch (e) { setMsg(abort.current?.signal.aborted ? 'Ekspor dibatalkan.' : 'Gagal ekspor: ' + (e.message || e)); }
-    setProg(null);
+      validateSettings(cfg);
+      let blob;
+      if (mode === 'remotion') {
+        const videoBitrate = bitrateFor(cfg, quality);
+        const chk = await canRenderMediaOnWeb({width: cfg.width, height: cfg.height, container: 'mp4', videoCodec: 'h264', videoBitrate});
+        controller.signal.throwIfAborted();
+        if (!chk.canRender) throw new Error(chk.issues.map((i) => i.message).join('\n'));
+        const {getBlob} = await renderMediaOnWeb({composition: composition(), container: 'mp4', videoCodec: 'h264',
+          videoBitrate, signal: controller.signal, onProgress: (p) => setProg(Math.min(1, p.progress))});
+        blob = await getBlob();
+      } else {
+        blob = await exportWebAnimation({source, mode, cfg: {...cfg}, quality, signal: controller.signal, onProgress: setProg});
+      }
+      controller.signal.throwIfAborted();
+      if (!blob.size) throw new Error('Hasil video kosong.');
+      const filename = `animasi-${cfg.width}x${cfg.height}-${cfg.fps}fps.mp4`;
+      save(blob, filename); setMsg('Selesai: ' + filename + ' terunduh.');
+    } catch (e) { setMsg(controller.signal.aborted ? 'Ekspor dibatalkan.' : 'Gagal ekspor: ' + (e.message || e)); }
+    finally {abort.current = null; setProg(null);}
   }
   async function exportPng() {
+    if (abort.current) return;
+    const controller = new AbortController(); abort.current = controller; setProg(0); setMsg('Merender PNG…');
     try {
+      validateSettings(cfg);
       const frame = player.current?.getCurrentFrame() ?? 0;
-      const {blob} = await renderStillOnWeb({composition: composition(), frame, imageFormat: 'png'});
-      save(blob, 'frame-' + frame + '.png');
-    } catch (e) { setMsg('Gagal ekspor PNG: ' + (e.message || e)); }
+      const {blob} = await renderStillOnWeb({composition: composition(), frame, imageFormat: 'png', signal: controller.signal});
+      controller.signal.throwIfAborted();
+      save(blob, 'frame-' + frame + '.png'); setMsg('PNG terunduh.');
+    } catch (e) { setMsg(controller.signal.aborted ? 'Ekspor dibatalkan.' : 'Gagal ekspor PNG: ' + (e.message || e)); }
+    finally {abort.current = null; setProg(null);}
   }
   const onTab = (e) => { if (e.key === 'Tab') { e.preventDefault(); const s = e.target.selectionStart;
     updateSource(source.slice(0, s) + '  ' + source.slice(e.target.selectionEnd)); requestAnimationFrame(() => { e.target.selectionStart = e.target.selectionEnd = s + 2; }); } };
@@ -148,51 +180,54 @@ export default function App() {
     <div className="app">
       <header>
         <h1>Remotion Studio Web</h1>
-        <div className="row">
+        <fieldset disabled={busy} className="row controls">
           <select onChange={(e) => e.target.value && (setCode(TEMPLATES[e.target.value]), setMode('remotion'))} defaultValue="">
             <option value="">Contoh kode…</option>{Object.keys(TEMPLATES).map((k) => <option key={k}>{k}</option>)}
           </select>
           <label className="btn">Buka file<input type="file" accept=".tsx,.jsx,.ts,.js,.txt,.html,.htm,.css" hidden onChange={openFile} /></label>
           <button onClick={() => save(new Blob([source], {type: mode === 'html' ? 'text/html' : mode === 'css' ? 'text/css' : 'text/plain'}), 'animasi.' + (mode === 'html' ? 'html' : mode === 'css' ? 'css' : 'tsx'))}>Simpan kode</button>
           <button onClick={async () => { try { await navigator.clipboard.writeText(source); setMsg('Kode disalin.'); } catch { setMsg('Tidak dapat menyalin. Gunakan Simpan kode.'); } }}>Salin</button>
-        </div>
+        </fieldset>
       </header>
       <main>
         <section className="editor">
           <div className="mode-bar" role="group" aria-label="Jenis kode animasi">
             {[['remotion', 'Remotion / TSX'], ['html', 'HTML + CSS + JS'], ['css', 'CSS']].map(([value, label]) =>
-              <button key={value} aria-pressed={mode === value} onClick={() => {setMode(value); setErr(''); setMsg('');}}>{label}</button>)}
+              <button disabled={busy} key={value} aria-pressed={mode === value} onClick={() => {setMode(value); setErr(''); setMsg('');}}>{label}</button>)}
           </div>
-          <textarea spellCheck={false} value={source} onChange={(e) => updateSource(e.target.value)} onKeyDown={onTab} aria-label="Kode animasi" />
+          <textarea disabled={busy} spellCheck={false} value={source} onChange={(e) => updateSource(e.target.value)} onKeyDown={onTab} aria-label="Kode animasi" />
           {err && <pre className="err">{err}</pre>}
         </section>
         <section className="side">
-          <div className="stage" style={{aspectRatio: cfg.width + '/' + cfg.height}}>
-            {mode !== 'remotion' ? <iframe key={previewKey} ref={iframe} title="Pratinjau animasi web" sandbox="allow-scripts" srcDoc={documentSource} /> : comp && <Player ref={player} component={comp} durationInFrames={frames} fps={cfg.fps}
+          <div ref={stage} className="stage" style={{aspectRatio: cfg.width + '/' + cfg.height}}>
+            {mode !== 'remotion' ? (!settingsError && <div style={{width: cfg.width, height: cfg.height, transform: `scale(${previewScale})`, transformOrigin: 'top left'}}><iframe key={previewKey} ref={iframe} title="Pratinjau animasi web" sandbox="allow-scripts" srcDoc={documentSource} /></div>) : comp && !settingsError && <Player ref={player} component={comp} durationInFrames={frames} fps={cfg.fps}
               compositionWidth={cfg.width} compositionHeight={cfg.height} controls loop style={{width: '100%', height: '100%'}}
               errorFallback={({error}) => <pre className="err">{error.message}</pre>} />}
           </div>
-          {mode !== 'remotion' && <div className="row"><button onClick={() => {setErr(''); setPreviewKey((key) => key + 1);}}>Putar ulang animasi</button><span className="hint">Pratinjau browser langsung</span></div>}
-          <div className="grid">
+          {mode !== 'remotion' && <div className="row"><button disabled={busy} onClick={() => {setErr(''); setPreviewKey((key) => key + 1);}}>Putar ulang animasi</button><span className="hint">Pratinjau browser langsung</span></div>}
+          <fieldset disabled={busy} className="grid controls">
             <label>Ukuran<select onChange={(e) => { const [w, h] = PRESETS[e.target.value]; setCfg((c) => ({...c, width: w, height: h})); }} value="">
               <option value="" disabled>{cfg.width}×{cfg.height}</option>{Object.keys(PRESETS).map((k) => <option key={k}>{k}</option>)}</select></label>
+            <label>Lebar (px)<input type="number" value={cfg.width} min="2" max="4096" step="2" onChange={set('width')} /></label>
+            <label>Tinggi (px)<input type="number" value={cfg.height} min="2" max="4096" step="2" onChange={set('height')} /></label>
             <label>FPS<input type="number" value={cfg.fps} min="1" max="60" onChange={set('fps')} /></label>
-            <label>Durasi (detik)<input type="number" step="0.5" value={cfg.dur} min="0.1" onChange={set('dur')} /></label>
+            <label>Durasi (detik)<input type="number" step="0.5" value={cfg.dur} min="0.1" max="300" onChange={set('dur')} /></label>
             <label>Kualitas<select value={quality} onChange={(e) => setQuality(e.target.value)}>
               <option value="low">Rendah</option><option value="medium">Sedang</option><option value="high">Tinggi</option><option value="very-high">Sangat tinggi</option></select></label>
-          </div>
+          </fieldset>
+          {settingsError && <p className="err">{settingsError}</p>}
           <div className="row">
-            <button className="primary" disabled={mode !== 'remotion' || !comp || !!err || prog !== null} onClick={exportMp4}>Ekspor MP4</button>
-            <button disabled={mode !== 'remotion' || !comp || !!err || prog !== null} onClick={exportPng}>Ekspor frame PNG</button>
+            <button className="primary" disabled={(mode === 'remotion' && !comp) || !!err || !!settingsError || preparedSource !== mode + source || busy} onClick={exportMp4}>Ekspor MP4</button>
+            <button disabled={mode !== 'remotion' || !comp || !!err || !!settingsError || preparedSource !== mode + source || busy} onClick={exportPng}>Ekspor frame PNG</button>
             {prog !== null && <button onClick={() => abort.current?.abort()}>Batalkan</button>}
           </div>
           {prog !== null && <progress value={prog} max="1" />}
-          {msg && <p className="msg">{msg}</p>}
+          {msg && <p className="msg" role="status">{msg}</p>}
           <p className="hint">{mode === 'remotion'
             ? `${frames} frame · Remotion 4.0.536. Gunakan export default untuk komponen dan export const config untuk ukuran/FPS/durasi. Modul tersedia: ${Object.keys(MODS).join(', ')}.`
-            : mode === 'html' ? 'Tempel dokumen HTML atau fragmen dengan <style> dan <script>. Mendukung CSS keyframes, SVG, Canvas, Web Animations API, serta pustaka browser melalui CDN. Gunakan URL aset absolut. Ekspor MP4/PNG tersedia pada mode Remotion.'
-            : 'Tulis CSS termasuk @keyframes. Elemen contoh: .scene > .box. Gunakan mode HTML untuk markup sendiri. Ekspor MP4/PNG tersedia pada mode Remotion.'}</p>
-          <p className="hint">HTML berjalan dalam sandbox. Remotion menjalankan JavaScript di editor: buka hanya kode tepercaya. Paket npm di luar daftar, API Node.js, dan proyek multi-file belum didukung. Hasil ekspor bergantung pada dukungan browser dan renderer.</p>
+            : mode === 'html' ? 'Tempel dokumen HTML atau fragmen dengan <style> dan <script>. Mendukung CSS keyframes, SVG, Canvas, Web Animations API, serta pustaka browser melalui CDN. Gunakan URL aset absolut. Ekspor MP4 mengikuti resolusi, FPS, dan durasi di atas; PNG tersedia pada mode Remotion.'
+            : 'Tulis CSS termasuk @keyframes. Elemen contoh: .scene > .box. Gunakan mode HTML untuk markup sendiri. Ekspor MP4 mengikuti resolusi, FPS, dan durasi di atas; PNG tersedia pada mode Remotion.'}</p>
+          <p className="hint">HTML berjalan dalam sandbox. Remotion menjalankan JavaScript di editor: buka hanya kode tepercaya. Paket npm di luar daftar, API Node.js, dan proyek multi-file belum didukung. MP4 memerlukan WebCodecs H.264 (disarankan Chrome/Edge terbaru). Ekspor HTML/CSS tanpa audio; aset memerlukan CORS. Video/iframe tertanam, GIF bergerak, dan beberapa efek CSS tidak didukung. Gunakan Remotion untuk media dan sinkronisasi kompleks.</p>
         </section>
       </main>
     </div>
