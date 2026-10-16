@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test export-settings.test.js"
   },
   "dependencies": {
     "@remotion/animation-utils": "4.0.536",
@@ -20,6 +21,8 @@
     "@remotion/shapes": "4.0.536",
     "@remotion/transitions": "4.0.536",
     "@remotion/web-renderer": "4.0.536",
+    "html-to-image": "^1.11.13",
+    "mediabunny": "1.61.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "remotion": "4.0.536",
