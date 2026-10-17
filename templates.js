@@ -60,4 +60,61 @@ export default function Demo() {
     </TransitionSeries>
   );
 }
+`,
+'Partikel noise': `import {AbsoluteFill, useCurrentFrame, useVideoConfig} from 'remotion';
+import {noise2D} from '@remotion/noise';
+
+export const config = {width: 1280, height: 720, fps: 30, durationInFrames: 180};
+
+export default function Partikel() {
+  const frame = useCurrentFrame();
+  const {width, height} = useVideoConfig();
+  const dots = Array.from({length: 80}, (_, i) => {
+    const x = (noise2D('pos-x', i * 1.7, frame / 120) * 0.5 + 0.5) * width;
+    const y = (noise2D('pos-y', i * 1.7, frame / 120) * 0.5 + 0.5) * height;
+    const r = 3 + 9 * (noise2D('ukuran', i, frame / 90) * 0.5 + 0.5);
+    return <circle key={i} cx={x} cy={y} r={r} fill={'hsl(' + (190 + (i % 60)) + ' 70% 60%)'} opacity={0.55} />;
+  });
+  return <AbsoluteFill style={{background: '#0b1020'}}><svg width={width} height={height}>{dots}</svg></AbsoluteFill>;
+}
+`,
+'Teks gradasi': `import {AbsoluteFill, useCurrentFrame, interpolate} from 'remotion';
+
+export const config = {width: 1280, height: 720, fps: 30, durationInFrames: 150};
+
+export default function Gradasi() {
+  const frame = useCurrentFrame();
+  const shift = interpolate(frame, [0, 150], [0, 100]);
+  const opacity = interpolate(frame, [0, 20, 130, 150], [0, 1, 1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  return (
+    <AbsoluteFill style={{background: '#14171f', alignItems: 'center', justifyContent: 'center'}}>
+      <h1 style={{
+        fontSize: 110, fontFamily: 'sans-serif', fontWeight: 900, margin: 0, opacity,
+        background: 'linear-gradient(90deg, #f5d300, #ff5f6d, #8a2be2, #f5d300)',
+        backgroundSize: '300% 100%', backgroundPosition: shift + '% 0',
+        WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent',
+      }}>Animasi Gradasi</h1>
+    </AbsoluteFill>
+  );
+}
+`,
+'Hitung mundur': `import {AbsoluteFill, useCurrentFrame, useVideoConfig, spring, interpolate} from 'remotion';
+
+export const config = {width: 1080, height: 1080, fps: 30, durationInFrames: 150};
+
+export default function Mundur() {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const index = Math.min(4, Math.floor(frame / 30));
+  const number = 5 - index;
+  const local = frame % 30;
+  const s = spring({frame: local, fps, config: {damping: 10}});
+  const opacity = interpolate(local, [0, 6, 24, 30], [0.2, 1, 1, 0.2], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  return (
+    <AbsoluteFill style={{background: '#101418', alignItems: 'center', justifyContent: 'center'}}>
+      <div style={{color: '#4ade80', fontSize: 260, fontFamily: 'monospace', fontWeight: 700,
+        transform: 'scale(' + s + ')', opacity}}>{number}</div>
+    </AbsoluteFill>
+  );
+}
 `};
